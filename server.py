@@ -1,296 +1,275 @@
-from flask import Flask, request, jsonify, send_file, render_template_string
+from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import os
 import json
 from datetime import datetime
 import hashlib
-import base64
 from pathlib import Path
-import google.generativeai as genai
-from PIL import Image
-import mimetypes
 from dotenv import load_dotenv
+from prompt_injection_detector import PromptInjectionDetector
 
 load_dotenv()
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
-# Configure CORS for both local and Render deployments
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+# Configure CORS
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5000')
 allowed_origins = [
-    'http://localhost:3000',
     'http://localhost:5000',
-    'https://validator-ixxm.onrender.com',
+    'http://localhost:3000',
+    'https://prompt-validator.onrender.com',
     FRONTEND_URL
 ]
 
 CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)
 
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'input', 'pending')
-PROCESSED_FOLDER = os.path.join(os.path.dirname(__file__), 'input', 'processed')
-FAILED_FOLDER = os.path.join(os.path.dirname(__file__), 'input', 'failed')
-PROMPTS_FOLDER = os.path.join(os.path.dirname(__file__), 'prompts')
-ALLOWED_EXTENSIONS = {'json', 'txt', 'py', 'cpp', 'java', 'js', 'pdf', 'md', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
-IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
-MAX_FILE_SIZE = 50 * 1024 * 1024
+# Folder structure for analysis results
+RESULTS_FOLDER = os.path.join(os.path.dirname(__file__), 'validation_results')
+CRITICAL_FOLDER = os.path.join(RESULTS_FOLDER, 'critical')
+HIGH_FOLDER = os.path.join(RESULTS_FOLDER, 'high')
+MEDIUM_FOLDER = os.path.join(RESULTS_FOLDER, 'medium')
+LOW_FOLDER = os.path.join(RESULTS_FOLDER, 'low')
 
-app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+for folder in [CRITICAL_FOLDER, HIGH_FOLDER, MEDIUM_FOLDER, LOW_FOLDER]:
+    os.makedirs(folder, exist_ok=True)
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(PROCESSED_FOLDER, exist_ok=True)
-os.makedirs(FAILED_FOLDER, exist_ok=True)
+# Initialize detector
+detector = PromptInjectionDetector()
 
-# Initialize Gemini API
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    GEMINI_MODEL = genai.GenerativeModel('gemini-2.0-flash')
+MAX_PROMPT_LENGTH = 10000
 
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def generate_prompt_id(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode()).hexdigest()[:16]
 
 
-def is_image(filename):
-    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-    return ext in IMAGE_EXTENSIONS
+def save_analysis(analysis_result: dict) -> str:
+    prompt_id = generate_prompt_id(analysis_result['prompt'])
+    risk_level = analysis_result['overall_risk_level']
 
-
-def load_prompt(prompt_type):
-    prompt_file = os.path.join(PROMPTS_FOLDER, f'{prompt_type}.txt')
-    if os.path.exists(prompt_file):
-        with open(prompt_file, 'r') as f:
-            return f.read()
-    return None
-
-
-def process_image_with_gemini(image_path, prompt):
-    if not GEMINI_API_KEY:
-        return {'error': 'Gemini API key not configured', 'success': False}
-
-    try:
-        img = Image.open(image_path)
-        response = GEMINI_MODEL.generate_content([prompt, img])
-
-        return {
-            'success': True,
-            'response': response.text,
-            'model': 'gemini-2.0-flash'
-        }
-    except Exception as e:
-        return {'error': str(e), 'success': False}
-
-
-def generate_metadata(filename, file_path):
-    file_size = os.path.getsize(file_path)
-    with open(file_path, 'rb') as f:
-        file_hash = hashlib.sha256(f.read()).hexdigest()
-
-    return {
-        'filename': filename,
-        'timestamp': datetime.utcnow().isoformat(),
-        'file_size': file_size,
-        'hash': file_hash,
-        'status': 'pending'
+    # Determine folder based on risk level
+    folder_map = {
+        'critical': CRITICAL_FOLDER,
+        'high': HIGH_FOLDER,
+        'medium': MEDIUM_FOLDER,
+        'low': LOW_FOLDER
     }
 
+    folder = folder_map.get(risk_level, LOW_FOLDER)
+    result_file = os.path.join(folder, f'{prompt_id}.json')
 
-@app.route('/upload', methods=['POST'])
-def upload_problem():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
+    # Add metadata
+    analysis_result['id'] = prompt_id
+    analysis_result['timestamp'] = datetime.utcnow().isoformat()
+    analysis_result['risk_folder'] = risk_level
 
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'Empty filename'}), 400
+    with open(result_file, 'w') as f:
+        json.dump(analysis_result, f, indent=2)
 
-    if not allowed_file(file.filename):
-        return jsonify({'error': f'File type not allowed. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
-
-    filename = secure_filename(file.filename)
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-
-    file.save(file_path)
-    metadata = generate_metadata(filename, file_path)
-
-    metadata_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{filename}.meta.json')
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
-
-    return jsonify({
-        'message': 'File uploaded successfully',
-        'filename': filename,
-        'hash': metadata['hash'],
-        'status': 'pending'
-    }), 201
-
-
-@app.route('/status/<filename>', methods=['GET'])
-def get_status(filename):
-    filename = secure_filename(filename)
-
-    for folder_path in [UPLOAD_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER]:
-        meta_file = os.path.join(folder_path, f'{filename}.meta.json')
-        if os.path.exists(meta_file):
-            with open(meta_file, 'r') as f:
-                metadata = json.load(f)
-            return jsonify(metadata), 200
-
-    return jsonify({'error': 'File not found'}), 404
-
-
-@app.route('/list', methods=['GET'])
-def list_submissions():
-    submissions = []
-
-    for folder_name, folder_path in [('pending', UPLOAD_FOLDER),
-                                      ('processed', PROCESSED_FOLDER),
-                                      ('failed', FAILED_FOLDER)]:
-        for file in os.listdir(folder_path):
-            if file.endswith('.meta.json'):
-                with open(os.path.join(folder_path, file), 'r') as f:
-                    meta = json.load(f)
-                    meta['folder'] = folder_name
-                    submissions.append(meta)
-
-    return jsonify(submissions), 200
-
-
-@app.route('/process/<filename>', methods=['POST'])
-def process_file(filename):
-    filename = secure_filename(filename)
-    prompt_type = request.json.get('prompt_type', 'validator') if request.json else 'validator'
-
-    meta_file = os.path.join(app.config['UPLOAD_FOLDER'], f'{filename}.meta.json')
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-
-    if not os.path.exists(file_path):
-        return jsonify({'error': 'File not found'}), 404
-
-    if not is_image(filename):
-        return jsonify({'error': 'File is not an image'}), 400
-
-    prompt = load_prompt(prompt_type)
-    if not prompt:
-        return jsonify({'error': f'Prompt type "{prompt_type}" not found'}), 404
-
-    result = process_image_with_gemini(file_path, prompt)
-
-    if result.get('success'):
-        # Update metadata
-        if os.path.exists(meta_file):
-            with open(meta_file, 'r') as f:
-                metadata = json.load(f)
-            metadata['status'] = 'processed'
-            metadata['processing_result'] = result.get('response', '')
-            metadata['processed_at'] = datetime.utcnow().isoformat()
-            with open(meta_file, 'w') as f:
-                json.dump(metadata, f, indent=2)
-
-        return jsonify({
-            'success': True,
-            'filename': filename,
-            'result': result.get('response'),
-            'model': result.get('model')
-        }), 200
-    else:
-        return jsonify({'error': result.get('error', 'Processing failed'), 'success': False}), 500
-
-
-@app.route('/process-batch', methods=['POST'])
-def process_batch():
-    prompt_type = request.json.get('prompt_type', 'validator') if request.json else 'validator'
-    files = request.json.get('files', []) if request.json else []
-
-    if not files:
-        return jsonify({'error': 'No files specified'}), 400
-
-    results = []
-    for filename in files:
-        filename = secure_filename(filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-
-        if not os.path.exists(file_path) or not is_image(filename):
-            results.append({
-                'filename': filename,
-                'success': False,
-                'error': 'File not found or not an image'
-            })
-            continue
-
-        prompt = load_prompt(prompt_type)
-        if not prompt:
-            results.append({
-                'filename': filename,
-                'success': False,
-                'error': f'Prompt type "{prompt_type}" not found'
-            })
-            continue
-
-        result = process_image_with_gemini(file_path, prompt)
-        results.append({
-            'filename': filename,
-            'success': result.get('success', False),
-            'result': result.get('response') if result.get('success') else None,
-            'error': result.get('error') if not result.get('success') else None
-        })
-
-    return jsonify({'results': results}), 200
+    return prompt_id
 
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'timestamp': datetime.utcnow().isoformat()}), 200
+    return jsonify({
+        'status': 'ok',
+        'service': 'Red Teaming Prompt Validator',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 200
 
 
-@app.route('/delete/<filename>', methods=['DELETE'])
-def delete_file(filename):
-    filename = secure_filename(filename)
+@app.route('/validate', methods=['POST'])
+def validate_prompt():
+    """
+    Validate a prompt for injection vulnerabilities.
+    Expected JSON body: {"prompt": "your prompt here"}
+    """
+    if not request.json or 'prompt' not in request.json:
+        return jsonify({'error': 'No prompt provided in request body'}), 400
 
-    # Try to delete from each folder
-    for folder_path in [UPLOAD_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER]:
-        file_path = os.path.join(folder_path, filename)
-        meta_path = os.path.join(folder_path, f'{filename}.meta.json')
+    prompt = request.json.get('prompt', '').strip()
 
-        if os.path.exists(file_path):
+    if not prompt:
+        return jsonify({'error': 'Prompt cannot be empty'}), 400
+
+    if len(prompt) > MAX_PROMPT_LENGTH:
+        return jsonify({
+            'error': f'Prompt exceeds maximum length of {MAX_PROMPT_LENGTH} characters'
+        }), 400
+
+    try:
+        # Generate analysis report
+        report = detector.generate_report(prompt)
+
+        # Save to appropriate folder
+        prompt_id = save_analysis(report)
+
+        return jsonify({
+            'id': prompt_id,
+            'timestamp': datetime.utcnow().isoformat(),
+            **report
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
+
+
+@app.route('/analyze', methods=['POST'])
+def analyze_prompt():
+    """Alias for /validate endpoint"""
+    return validate_prompt()
+
+
+@app.route('/result/<prompt_id>', methods=['GET'])
+def get_result(prompt_id):
+    """Retrieve a previous analysis result"""
+    prompt_id = secure_filename(prompt_id)
+
+    # Search in all risk folders
+    for folder in [CRITICAL_FOLDER, HIGH_FOLDER, MEDIUM_FOLDER, LOW_FOLDER]:
+        result_file = os.path.join(folder, f'{prompt_id}.json')
+        if os.path.exists(result_file):
+            with open(result_file, 'r') as f:
+                return jsonify(json.load(f)), 200
+
+    return jsonify({'error': 'Result not found'}), 404
+
+
+@app.route('/results', methods=['GET'])
+def list_results():
+    """List all analysis results grouped by risk level"""
+    results = {'critical': [], 'high': [], 'medium': [], 'low': []}
+
+    folder_map = {
+        'critical': CRITICAL_FOLDER,
+        'high': HIGH_FOLDER,
+        'medium': MEDIUM_FOLDER,
+        'low': LOW_FOLDER
+    }
+
+    for risk_level, folder in folder_map.items():
+        for file in os.listdir(folder):
+            if file.endswith('.json'):
+                with open(os.path.join(folder, file), 'r') as f:
+                    data = json.load(f)
+                    results[risk_level].append({
+                        'id': data['id'],
+                        'timestamp': data['timestamp'],
+                        'risk_score': data['risk_score'],
+                        'vulnerability_count': data['vulnerability_count'],
+                        'summary': data['summary']
+                    })
+
+    return jsonify(results), 200
+
+
+@app.route('/delete/<prompt_id>', methods=['DELETE'])
+def delete_result(prompt_id):
+    """Delete an analysis result"""
+    prompt_id = secure_filename(prompt_id)
+
+    for folder in [CRITICAL_FOLDER, HIGH_FOLDER, MEDIUM_FOLDER, LOW_FOLDER]:
+        result_file = os.path.join(folder, f'{prompt_id}.json')
+        if os.path.exists(result_file):
             try:
-                os.remove(file_path)
-                if os.path.exists(meta_path):
-                    os.remove(meta_path)
-                return jsonify({'message': 'File deleted successfully', 'filename': filename}), 200
+                os.remove(result_file)
+                return jsonify({'message': 'Analysis deleted successfully'}), 200
             except Exception as e:
-                return jsonify({'error': f'Failed to delete file: {str(e)}'}), 500
+                return jsonify({'error': f'Failed to delete: {str(e)}'}), 500
 
-    return jsonify({'error': 'File not found'}), 404
+    return jsonify({'error': 'Result not found'}), 404
 
 
-@app.route('/download/<filename>', methods=['GET'])
-def download_file(filename):
-    filename = secure_filename(filename)
+@app.route('/batch-validate', methods=['POST'])
+def batch_validate():
+    """
+    Validate multiple prompts at once.
+    Expected JSON body: {"prompts": ["prompt1", "prompt2", ...]}
+    """
+    if not request.json or 'prompts' not in request.json:
+        return jsonify({'error': 'No prompts provided'}), 400
 
-    for folder_path in [UPLOAD_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER]:
-        file_path = os.path.join(folder_path, filename)
-        if os.path.exists(file_path):
-            try:
-                return send_file(file_path, as_attachment=False)
-            except Exception as e:
-                return jsonify({'error': f'Failed to download file: {str(e)}'}), 500
+    prompts = request.json.get('prompts', [])
 
-    return jsonify({'error': 'File not found'}), 404
+    if not isinstance(prompts, list):
+        return jsonify({'error': 'Prompts must be a list'}), 400
+
+    if len(prompts) > 50:
+        return jsonify({'error': 'Maximum 50 prompts per batch'}), 400
+
+    results = []
+    for prompt in prompts:
+        if isinstance(prompt, str) and prompt.strip():
+            report = detector.generate_report(prompt.strip())
+            prompt_id = save_analysis(report)
+            results.append({
+                'id': prompt_id,
+                **report
+            })
+
+    return jsonify({'results': results}), 200
+
+
+@app.route('/stats', methods=['GET'])
+def get_stats():
+    """Get statistics about all analyses"""
+    stats = {
+        'total': 0,
+        'by_risk_level': {'critical': 0, 'high': 0, 'medium': 0, 'low': 0},
+        'total_vulnerabilities': 0,
+        'average_risk_score': 0.0
+    }
+
+    all_risk_scores = []
+
+    for risk_level in ['critical', 'high', 'medium', 'low']:
+        folder_map = {
+            'critical': CRITICAL_FOLDER,
+            'high': HIGH_FOLDER,
+            'medium': MEDIUM_FOLDER,
+            'low': LOW_FOLDER
+        }
+        folder = folder_map[risk_level]
+
+        for file in os.listdir(folder):
+            if file.endswith('.json'):
+                with open(os.path.join(folder, file), 'r') as f:
+                    data = json.load(f)
+                    stats['total'] += 1
+                    stats['by_risk_level'][risk_level] += 1
+                    stats['total_vulnerabilities'] += data['vulnerability_count']
+                    all_risk_scores.append(data['risk_score'])
+
+    if all_risk_scores:
+        stats['average_risk_score'] = round(sum(all_risk_scores) / len(all_risk_scores), 2)
+
+    return jsonify(stats), 200
 
 
 @app.route('/')
 def index():
+    """Serve the main web interface"""
     with open('index.html', 'r') as f:
         return f.read()
 
 
-@app.route('/submissions')
-def submissions():
-    with open('submissions.html', 'r') as f:
-        return f.read()
+@app.route('/api/info', methods=['GET'])
+def api_info():
+    """Get API information and available endpoints"""
+    return jsonify({
+        'service': 'Red Teaming Prompt Validator',
+        'version': '1.0.0',
+        'endpoints': {
+            'POST /validate': 'Validate a single prompt for injection vulnerabilities',
+            'POST /analyze': 'Alias for /validate',
+            'POST /batch-validate': 'Validate multiple prompts (up to 50)',
+            'GET /result/<id>': 'Retrieve a previous analysis result',
+            'GET /results': 'List all analysis results by risk level',
+            'GET /stats': 'Get statistics about all analyses',
+            'DELETE /delete/<id>': 'Delete an analysis result',
+            'GET /health': 'Health check endpoint'
+        }
+    }), 200
 
 
 if __name__ == '__main__':
