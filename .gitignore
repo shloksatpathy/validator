@@ -24,6 +24,8 @@ wheels/
 *.swo
 *~
 .DS_Store
+.env
+.env.local
 
 # Input folders (optional - remove if you want to commit sample data)
 input/pending/*

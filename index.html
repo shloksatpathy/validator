@@ -488,6 +488,8 @@
             submitBtn.disabled = true;
             progressBar.classList.add('show');
             let completedUploads = 0;
+            const uploadedFiles = [];
+            const autoProcess = document.getElementById('autoProcessCheck').checked;
 
             for (let i = 0; i < selectedFiles.length; i++) {
                 const file = selectedFiles[i];
@@ -506,6 +508,7 @@
 
                     if (response.ok) {
                         const data = await response.json();
+                        uploadedFiles.push(data.filename);
                         console.log(`✓ ${file.name} uploaded successfully`);
                     } else {
                         const error = await response.json();
@@ -517,7 +520,36 @@
             }
 
             progressFill.style.width = '100%';
-            showMessage(`Successfully uploaded ${completedUploads}/${selectedFiles.length} file(s)! 🎉`, 'success');
+
+            if (autoProcess && uploadedFiles.length > 0) {
+                showMessage(`Uploaded! Processing with Gemini API...`, 'info');
+
+                for (const filename of uploadedFiles) {
+                    try {
+                        const processResponse = await fetch(`/process/${filename}`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ prompt_type: 'validator' })
+                        });
+
+                        if (processResponse.ok) {
+                            const processData = await processResponse.json();
+                            console.log(`✓ ${filename} processed:`, processData.result);
+                        } else {
+                            const error = await processResponse.json();
+                            console.error(`✗ Processing failed for ${filename}:`, error.error);
+                        }
+                    } catch (error) {
+                        console.error(`✗ Processing error for ${filename}:`, error.message);
+                    }
+                }
+
+                showMessage(`Successfully processed all files! 🎉`, 'success');
+            } else {
+                showMessage(`Successfully uploaded ${completedUploads}/${selectedFiles.length} file(s)! 🎉`, 'success');
+            }
 
             setTimeout(() => {
                 selectedFiles = [];
