@@ -72,29 +72,7 @@ def process_image_with_gemini(image_path, prompt):
 
     try:
         img = Image.open(image_path)
-
-        # Convert image to bytes
-        import io
-        img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format=img.format or 'PNG')
-        img_data = base64.standard_b64encode(img_byte_arr.getvalue()).decode('utf-8')
-
-        # Get image media type
-        media_type = f"image/{img.format.lower()}" if img.format else "image/png"
-
-        response = GEMINI_MODEL.generate_content([
-            {
-                "type": "image_data",
-                "image_data": {
-                    "mime_type": media_type,
-                    "data": img_data,
-                },
-            },
-            {
-                "type": "text",
-                "text": prompt
-            }
-        ])
+        response = GEMINI_MODEL.generate_content([prompt, img])
 
         return {
             'success': True,
