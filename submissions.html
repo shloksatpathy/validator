@@ -312,12 +312,21 @@
     </div>
 
     <script>
+        // API Configuration - automatically detects environment
+        const API_BASE_URL = (() => {
+            if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                return 'http://localhost:5000';
+            }
+            // For Render or other production deployments
+            return window.location.origin.replace('validator-ixxm', 'academic-validator-backend').replace('onrender.com', 'onrender.com');
+        })();
+
         let allSubmissions = [];
         let currentFilter = 'all';
 
         async function loadSubmissions() {
             try {
-                const response = await fetch('/list');
+                const response = await fetch(`${API_BASE_URL}/list`);
                 const data = await response.json();
                 allSubmissions = data || [];
                 displaySubmissions();
@@ -378,6 +387,12 @@
                             <span class="info-label">Hash:</span>
                             <span class="info-value" style="font-family: monospace; font-size: 11px;">${submission.hash.substring(0, 16)}...</span>
                         </div>
+                        ${submission.processing_result ? `
+                        <div class="info-row" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee;">
+                            <span class="info-label">Result:</span>
+                            <span class="info-value" style="max-height: 80px; overflow-y: auto; display: block; margin-top: 5px;">${submission.processing_result.substring(0, 150)}${submission.processing_result.length > 150 ? '...' : ''}</span>
+                        </div>
+                        ` : ''}
                     </div>
                     <div class="submission-actions">
                         <button class="action-btn view-btn" onclick="viewSubmission('${submission.filename}')">View</button>
@@ -412,12 +427,23 @@
         }
 
         function viewSubmission(filename) {
-            alert(`Viewing submission: ${filename}\n\nFeature coming soon!`);
+            window.open(`${API_BASE_URL}/download/${filename}`, '_blank');
         }
 
-        function deleteSubmission(filename) {
-            if (confirm(`Are you sure you want to delete ${filename}?`)) {
-                alert(`Deleted: ${filename}\n\nFeature coming soon!`);
+        async function deleteSubmission(filename) {
+            if (confirm(`Are you sure you want to delete ${filename}? This cannot be undone.`)) {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/delete/${filename}`, { method: 'DELETE' });
+                    if (response.ok) {
+                        allSubmissions = allSubmissions.filter(s => s.filename !== filename);
+                        displaySubmissions();
+                    } else {
+                        const error = await response.json();
+                        alert(`Error: ${error.error}`);
+                    }
+                } catch (error) {
+                    alert(`Delete failed: ${error.message}`);
+                }
             }
         }
 

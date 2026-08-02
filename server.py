@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, send_file, render_template_string
+from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import os
 import json
@@ -14,6 +15,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__, static_folder='.', static_url_path='')
+
+# Configure CORS for both local and Render deployments
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+allowed_origins = [
+    'http://localhost:3000',
+    'http://localhost:5000',
+    'https://validator-ixxm.onrender.com',
+    FRONTEND_URL
+]
+
+CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'input', 'pending')
 PROCESSED_FOLDER = os.path.join(os.path.dirname(__file__), 'input', 'processed')
@@ -140,12 +152,13 @@ def upload_problem():
 @app.route('/status/<filename>', methods=['GET'])
 def get_status(filename):
     filename = secure_filename(filename)
-    meta_file = os.path.join(app.config['UPLOAD_FOLDER'], f'{filename}.meta.json')
 
-    if os.path.exists(meta_file):
-        with open(meta_file, 'r') as f:
-            metadata = json.load(f)
-        return jsonify(metadata), 200
+    for folder_path in [UPLOAD_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER]:
+        meta_file = os.path.join(folder_path, f'{filename}.meta.json')
+        if os.path.exists(meta_file):
+            with open(meta_file, 'r') as f:
+                metadata = json.load(f)
+            return jsonify(metadata), 200
 
     return jsonify({'error': 'File not found'}), 404
 
@@ -254,6 +267,42 @@ def health():
     return jsonify({'status': 'ok', 'timestamp': datetime.utcnow().isoformat()}), 200
 
 
+@app.route('/delete/<filename>', methods=['DELETE'])
+def delete_file(filename):
+    filename = secure_filename(filename)
+
+    # Try to delete from each folder
+    for folder_path in [UPLOAD_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER]:
+        file_path = os.path.join(folder_path, filename)
+        meta_path = os.path.join(folder_path, f'{filename}.meta.json')
+
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                if os.path.exists(meta_path):
+                    os.remove(meta_path)
+                return jsonify({'message': 'File deleted successfully', 'filename': filename}), 200
+            except Exception as e:
+                return jsonify({'error': f'Failed to delete file: {str(e)}'}), 500
+
+    return jsonify({'error': 'File not found'}), 404
+
+
+@app.route('/download/<filename>', methods=['GET'])
+def download_file(filename):
+    filename = secure_filename(filename)
+
+    for folder_path in [UPLOAD_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER]:
+        file_path = os.path.join(folder_path, filename)
+        if os.path.exists(file_path):
+            try:
+                return send_file(file_path, as_attachment=False)
+            except Exception as e:
+                return jsonify({'error': f'Failed to download file: {str(e)}'}), 500
+
+    return jsonify({'error': 'File not found'}), 404
+
+
 @app.route('/')
 def index():
     with open('index.html', 'r') as f:
@@ -267,4 +316,6 @@ def submissions():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.getenv('PORT', 5000))
+    debug = os.getenv('FLASK_ENV', 'development') == 'development'
+    app.run(host='0.0.0.0', port=port, debug=debug)

@@ -402,6 +402,15 @@
     </div>
 
     <script>
+        // API Configuration - automatically detects environment
+        const API_BASE_URL = (() => {
+            if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                return 'http://localhost:5000';
+            }
+            // For Render or other production deployments
+            return window.location.origin.replace('validator-ixxm', 'academic-validator-backend').replace('onrender.com', 'onrender.com');
+        })();
+
         const fileInput = document.getElementById('fileInput');
         const cameraInput = document.getElementById('cameraInput');
         const dropZone = document.getElementById('dropZone');
@@ -497,7 +506,7 @@
                 formData.append('file', file);
 
                 try {
-                    const response = await fetch('/upload', {
+                    const response = await fetch(`${API_BASE_URL}/upload`, {
                         method: 'POST',
                         body: formData
                     });
@@ -526,7 +535,7 @@
 
                 for (const filename of uploadedFiles) {
                     try {
-                        const processResponse = await fetch(`/process/${filename}`, {
+                        const processResponse = await fetch(`${API_BASE_URL}/process/${filename}`, {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json'
